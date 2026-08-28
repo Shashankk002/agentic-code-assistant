@@ -1,0 +1,37 @@
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class ToolCall:
+    name: str
+    arguments: dict[str, Any]
+    id: str | None = None
+    thought_signature: Any | None = None
+
+
+@dataclass
+class ChatMessage:
+    role: str  # "system", "user", "assistant", or "tool"
+    content: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
+
+
+@dataclass
+class LLMResponse:
+    content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+class BaseLLM(ABC):
+    @abstractmethod
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        """Generate a response from the model given conversation messages and optional tool declarations."""
+        pass
