@@ -1,6 +1,15 @@
 from llm.base import BaseLLM, ChatMessage
 from tools.registry import ToolRegistry
 import json
+import logging
+
+logger = logging.getLogger("agent")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    _file_handler = logging.FileHandler("agent_debug.log")
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(_file_handler)
+    logger.propagate = False  # never bubble up to the console
 
 
 def _dump_messages(messages, path="debug_messages.json"):
@@ -19,12 +28,11 @@ def _dump_messages(messages, path="debug_messages.json"):
 
 
 def _debug_print_size(messages, iteration):
-    """Print a running count of messages and approximate size, per loop iteration."""
+    """Log a running count of messages and approximate size, per loop iteration."""
     total_chars = sum(len(m.content or "") for m in messages)
-    # Rough rule of thumb: ~4 characters per token for English text/code.
     approx_tokens = total_chars // 4
-    print(
-        f"[DEBUG] iteration {iteration}: {len(messages)} messages, "
+    logger.debug(
+        f"iteration {iteration}: {len(messages)} messages, "
         f"~{total_chars} chars, ~{approx_tokens} tokens (estimate)"
     )
 
@@ -67,18 +75,57 @@ def _compact_messages(messages: list[ChatMessage]) -> None:
         )
 
 
+def _short_args(arguments: dict, max_len: int = 60) -> str:
+    """Render tool arguments compactly for terminal display, truncating long values
+    (file content, shell commands) so a single tool call doesn't flood the line."""
+    parts = []
+    for k, v in arguments.items():
+        s = str(v)
+        if len(s) > max_len:
+            s = s[:max_len] + "..."
+        parts.append(f"{k}={s!r}")
+    return ", ".join(parts)
+
+
 class Agent:
+    DESTRUCTIVE_TOOLS = {"write_file", "edit_file", "run_command"}
+
     def __init__(
         self,
         llm: BaseLLM,
         tools: ToolRegistry | None = None,
         system_prompt: str | None = None,
         max_iterations: int = 10,
+        require_confirmation: bool = True,
     ):
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
+        self.require_confirmation = require_confirmation
+        self._always_allowed: set[str] = set()  # tool names approved for the rest of this session
+
+    def _confirm(self, tool_call) -> bool:
+        """
+        Permission gate for destructive tools (write_file, edit_file, run_command).
+        Prints the proposed action and asks for y/n, with an "always" option that
+        skips future prompts for that tool name for the rest of this run.
+        Returns True if the call should proceed.
+        """
+        if not self.require_confirmation:
+            return True
+        if tool_call.name not in self.DESTRUCTIVE_TOOLS:
+            return True
+        if tool_call.name in self._always_allowed:
+            return True
+
+        print(f"\n[PERMISSION] Agent wants to call: {tool_call.name}({_short_args(tool_call.arguments, max_len=200)})")
+        choice = input("Allow? [y]es / [n]o / [a]lways allow this tool: ").strip().lower()
+
+        if choice == "a":
+            self._always_allowed.add(tool_call.name)
+            return True
+        return choice == "y"
 
     def run(self, prompt: str) -> str:
         """Run the agent loop until the task is complete or max_iterations is reached."""
@@ -96,7 +143,31 @@ class Agent:
             _debug_print_size(messages, iteration)
 
             tools_schema = self.tools.get_schemas() if self.tools else None
-            response = self.llm.generate(messages, tools=tools_schema)
+            try:
+                response = self.llm.generate(messages, tools=tools_schema)
+            except Exception as e:
+                # Don't let a transient API failure (rate limit, network blip,
+                # provider outage) kill the whole interactive session -- return
+                # a message and let main.py's loop keep accepting input.
+                _dump_messages(messages)
+                error_str = str(e)
+                if "RequestsPerDay" in error_str or "PerDay" in error_str:
+                    return (
+                        "Agent stopped: daily API quota exhausted (free tier). "
+                        "This will NOT fix itself by retrying or waiting a few seconds "
+                        "-- it resets tomorrow, or you need to enable billing / use a "
+                        f"different API key. Details: {e}"
+                    )
+                if any(marker in error_str for marker in (
+                    "nodename nor servname", "Name or service not known",
+                    "Connection reset", "UNEXPECTED_EOF", "getaddrinfo failed",
+                )):
+                    return (
+                        "Agent stopped: couldn't reach the network (DNS/connection "
+                        f"issue, not a model error). Check your internet connection "
+                        f"and try again. Details: {e}"
+                    )
+                return f"Agent stopped: the model call failed ({e})."
 
             if not response.tool_calls:
                 messages.append(
@@ -117,14 +188,19 @@ class Agent:
             )
 
             for tool_call in response.tool_calls:
-                if self.tools:
+                logger.debug(f"[TOOL CALL] {tool_call.name}({tool_call.arguments})")
+
+                if not self._confirm(tool_call):
+                    tool_result = f"Tool call '{tool_call.name}' was denied by the user."
+                elif self.tools:
                     tool_result = self.tools.execute(
                         tool_call.name, tool_call.arguments
                     )
                 else:
                     tool_result = f"Tool '{tool_call.name}' could not be executed: No tool registry configured."
 
-                print(f"[TOOL RESULT] {tool_call.name}: {tool_result}")
+                logger.debug(f"[TOOL RESULT] {tool_call.name}: {tool_result}")
+                print(f"  → {tool_call.name}({_short_args(tool_call.arguments)})")
 
                 messages.append(
                     ChatMessage(

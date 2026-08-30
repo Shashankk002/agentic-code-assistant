@@ -1,30 +1,60 @@
+import argparse
 import os
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from llm.gemini import GeminiLLM
-from tools import default_registry
+from tools.dispatcher import default_registry
 from agents.agent import Agent
 from prompts import SYSTEM_PROMPT
 
 load_dotenv()
 
-def main():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Warning: GEMINI_API_KEY not set in environment or .env file.")
 
-    llm = GeminiLLM(model="gemini-3.5-flash-lite", api_key=api_key)
-    agent = Agent(
+def build_agent(no_confirm: bool = False) -> Agent:
+    llm = GeminiLLM(api_key=os.environ["GEMINI_API_KEY"])
+    return Agent(
         llm=llm,
         tools=default_registry,
         system_prompt=SYSTEM_PROMPT,
+        max_iterations=10,
+        require_confirmation=not no_confirm,
     )
 
-    prompt = "read every file in tools/, summarize each one, then tell me which has the most lines"
-    print(f"User: {prompt}\n")
 
-    response = agent.run(prompt)
-    print(f"Agent:\n{response}")
+def main():
+    parser = argparse.ArgumentParser(description="Agentic coding assistant")
+    parser.add_argument(
+        "prompt", nargs="?", default=None,
+        help="One-shot task. Omit to start an interactive session."
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip permission prompts for write_file/edit_file/run_command."
+    )
+    args = parser.parse_args()
+
+    agent = build_agent(no_confirm=args.yes)
+
+    if args.prompt:
+        result = agent.run(args.prompt)
+        print(f"\nAgent:\n{result}")
+        return
+
+    print("Agentic coding assistant. Type a task, or 'exit'/'quit' to stop.\n")
+    while True:
+        try:
+            user_input = input("User: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("exit", "quit", "bye", "end the session", "stop", "done"):
+            break
+
+        result = agent.run(user_input)
+        print(f"\nAgent:\n{result}\n")
 
 
 if __name__ == "__main__":

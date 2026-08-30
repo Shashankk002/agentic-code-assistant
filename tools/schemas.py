@@ -137,6 +137,16 @@ LIST_DIRECTORY_SCHEMA = {
                     "If true, includes normally-filtered directories like "
                     "__pycache__ and .git. Defaults to false."
                 )
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": (
+                    "If true, walks the full directory tree in one call instead "
+                    "of listing one level at a time. Prefer this over writing a "
+                    "custom shell/python script to enumerate files -- it's a "
+                    "single call and already excludes noise directories like "
+                    ".venv. Defaults to false."
+                )
             }
         },
         "required": []
