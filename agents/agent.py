@@ -88,8 +88,6 @@ def _short_args(arguments: dict, max_len: int = 60) -> str:
 
 
 class Agent:
-    DESTRUCTIVE_TOOLS = {"write_file", "edit_file", "run_command"}
-
     def __init__(
         self,
         llm: BaseLLM,
@@ -114,7 +112,7 @@ class Agent:
         """
         if not self.require_confirmation:
             return True
-        if tool_call.name not in self.DESTRUCTIVE_TOOLS:
+        if not (self.tools and self.tools.is_destructive(tool_call.name)):
             return True
         if tool_call.name in self._always_allowed:
             return True
@@ -146,27 +144,10 @@ class Agent:
             try:
                 response = self.llm.generate(messages, tools=tools_schema)
             except Exception as e:
-                # Don't let a transient API failure (rate limit, network blip,
-                # provider outage) kill the whole interactive session -- return
-                # a message and let main.py's loop keep accepting input.
+                # Don't let an API failure (rate limit, network issue, provider
+                # outage) kill the whole interactive session -- the error
+                # message itself already says what went wrong.
                 _dump_messages(messages)
-                error_str = str(e)
-                if "RequestsPerDay" in error_str or "PerDay" in error_str:
-                    return (
-                        "Agent stopped: daily API quota exhausted (free tier). "
-                        "This will NOT fix itself by retrying or waiting a few seconds "
-                        "-- it resets tomorrow, or you need to enable billing / use a "
-                        f"different API key. Details: {e}"
-                    )
-                if any(marker in error_str for marker in (
-                    "nodename nor servname", "Name or service not known",
-                    "Connection reset", "UNEXPECTED_EOF", "getaddrinfo failed",
-                )):
-                    return (
-                        "Agent stopped: couldn't reach the network (DNS/connection "
-                        f"issue, not a model error). Check your internet connection "
-                        f"and try again. Details: {e}"
-                    )
                 return f"Agent stopped: the model call failed ({e})."
 
             if not response.tool_calls:

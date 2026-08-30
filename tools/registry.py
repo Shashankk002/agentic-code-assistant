@@ -38,27 +38,45 @@ def _coerce_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict
 
 class ToolRegistry:
     def __init__(self):
-        self._tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]] = {}
+        self._tools: dict[str, tuple[Callable[..., Any], dict[str, Any], bool]] = {}
 
     def register(
         self,
         name: str,
         func: Callable[..., Any],
         schema: dict[str, Any],
+        destructive: bool = False,
     ) -> None:
-        """Register a tool with its execution function and schema."""
-        self._tools[name] = (func, schema)
+        """
+        Register a tool with its execution function and schema.
+
+        `destructive` is internal bookkeeping for the permission gate only --
+        it is NOT part of `schema`, because `schema` gets sent to the LLM
+        provider as-is (e.g. wrapped in a Gemini function declaration), and
+        provider APIs reject unrecognized fields there.
+        """
+        self._tools[name] = (func, schema, destructive)
 
     def get_schemas(self) -> list[dict[str, Any]]:
         """Get the JSON schemas of all registered tools."""
-        return [schema for _, schema in self._tools.values()]
+        return [schema for _, schema, _ in self._tools.values()]
+
+    def is_destructive(self, name: str) -> bool:
+        """Whether a tool was registered as destructive. Unknown tool names are
+        treated as destructive by default -- safer to ask for confirmation on
+        a typo'd or unregistered tool name than to silently skip the gate."""
+        entry = self._tools.get(name)
+        if entry is None:
+            return True
+        _, _, destructive = entry
+        return destructive
 
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool by name with arguments and return a string result."""
         if name not in self._tools:
             return f"Unknown tool: {name}"
 
-        func, schema = self._tools[name]
+        func, schema, _ = self._tools[name]
         arguments = _coerce_arguments(arguments, schema)
         try:
             result = func(**arguments)

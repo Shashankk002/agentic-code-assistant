@@ -7,7 +7,7 @@ from llm.base import BaseLLM, ChatMessage, LLMResponse, ToolCall
 
 
 class GeminiLLM(BaseLLM):
-    def __init__(self, model: str = "gemini-3.5-flash", api_key: str | None = None):
+    def __init__(self, model: str = "gemini-3.5-flash-lite", api_key: str | None = None):
         self.model = model
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.client = genai.Client(api_key=self.api_key)

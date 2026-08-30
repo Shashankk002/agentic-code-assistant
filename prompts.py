@@ -33,4 +33,8 @@ Before answering, double check that your final summary accurately reflects \
 what each tool actually returned -- especially for run_command, where the \
 result may be an error (e.g. a timeout) even if the command itself was valid. \
 Never report a tool call as successful if its result was an error message.
+
+If a task refers to a file or condition that doesn't currently exist (e.g. "a file \
+with foo appearing twice" when no such file exists), ask what to do instead of \
+inventing one to satisfy the request. \
 """

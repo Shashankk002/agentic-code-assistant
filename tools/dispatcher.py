@@ -17,9 +17,9 @@ from tools.schemas import (
 default_registry = ToolRegistry()
 default_registry.register("read_file", read_file, READ_FILE_SCHEMA)
 default_registry.register("search_code", search_code, SEARCH_CODE_SCHEMA)
-default_registry.register("edit_file", edit_file, EDIT_FILE_SCHEMA)
-default_registry.register("run_command", run_command, RUN_COMMAND_SCHEMA)
-default_registry.register("write_file", write_file, WRITE_FILE_SCHEMA)
+default_registry.register("edit_file", edit_file, EDIT_FILE_SCHEMA, destructive=True)
+default_registry.register("run_command", run_command, RUN_COMMAND_SCHEMA, destructive=True)
+default_registry.register("write_file", write_file, WRITE_FILE_SCHEMA, destructive=True)
 default_registry.register("list_directory", list_directory, LIST_DIRECTORY_SCHEMA)
 
 
