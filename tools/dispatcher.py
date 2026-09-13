@@ -23,6 +23,5 @@ default_registry.register("write_file", write_file, WRITE_FILE_SCHEMA, destructi
 default_registry.register("list_directory", list_directory, LIST_DIRECTORY_SCHEMA)
 
 
-
 def execute_tool(name: str, arguments: dict):
     return default_registry.execute(name, arguments)

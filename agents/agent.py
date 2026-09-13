@@ -1,7 +1,8 @@
-from llm.base import BaseLLM, ChatMessage
-from tools.registry import ToolRegistry
 import json
 import logging
+
+from llm.base import BaseLLM, ChatMessage
+from tools.registry import ToolRegistry
 
 logger = logging.getLogger("agent")
 logger.setLevel(logging.DEBUG)
@@ -9,7 +10,7 @@ if not logger.handlers:
     _file_handler = logging.FileHandler("agent_debug.log")
     _file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(_file_handler)
-    logger.propagate = False  # never bubble up to the console
+    logger.propagate = False  # keep the terminal to one line per tool call
 
 
 def _dump_messages(messages, path="debug_messages.json"):
@@ -17,9 +18,9 @@ def _dump_messages(messages, path="debug_messages.json"):
     serializable = [
         {
             "role": m.role,
-            "name": getattr(m, "name", None),
+            "name": m.name,
             "content": m.content,
-            "tool_call_id": getattr(m, "tool_call_id", None),
+            "tool_call_id": m.tool_call_id,
         }
         for m in messages
     ]
@@ -27,8 +28,7 @@ def _dump_messages(messages, path="debug_messages.json"):
         json.dump(serializable, f, indent=2)
 
 
-def _debug_print_size(messages, iteration):
-    """Log a running count of messages and approximate size, per loop iteration."""
+def _log_context_size(messages, iteration):
     total_chars = sum(len(m.content or "") for m in messages)
     approx_tokens = total_chars // 4
     logger.debug(
@@ -37,23 +37,21 @@ def _debug_print_size(messages, iteration):
     )
 
 
-CONTEXT_CHAR_THRESHOLD = 12_000   # ~3,000 tokens; tune based on your model's window
-KEEP_RECENT_TOOL_MESSAGES = 3     # always leave the N most recent tool results untouched
-TRUNCATE_TO_CHARS = 300           # how much of an older tool result survives compaction
+CONTEXT_CHAR_THRESHOLD = 12_000   # ~3,000 tokens
+KEEP_RECENT_TOOL_MESSAGES = 3     # most recent tool results are never truncated
+TRUNCATE_TO_CHARS = 300           # how much of an older tool result survives
 _TRUNCATION_MARKER = "...[truncated to save context"
 
 
 def _compact_messages(messages: list[ChatMessage]) -> None:
     """
-    Once the running conversation exceeds CONTEXT_CHAR_THRESHOLD characters,
-    shrink OLDER tool-result messages down to a short preview instead of
-    their full content. Mutates messages in place.
+    Once the conversation exceeds CONTEXT_CHAR_THRESHOLD characters, shrink
+    older tool results to a short preview, in place. The most recent
+    KEEP_RECENT_TOOL_MESSAGES results are left intact since the model is
+    most likely to need those verbatim on its next step.
 
-    The most recent KEEP_RECENT_TOOL_MESSAGES tool results are always left
-    full-size, since those are what the model is most likely to need
-    verbatim on its very next step. This is truncation-based (not
-    LLM-summarized): cheap, dependency-free, and if the model needs a
-    truncated result's detail later, it can just re-call the tool.
+    Truncation rather than LLM summarization: no extra API call, and if the
+    model needs the detail later it can re-call the tool.
     """
     total_chars = sum(len(m.content or "") for m in messages)
     if total_chars <= CONTEXT_CHAR_THRESHOLD:
@@ -76,8 +74,7 @@ def _compact_messages(messages: list[ChatMessage]) -> None:
 
 
 def _short_args(arguments: dict, max_len: int = 60) -> str:
-    """Render tool arguments compactly for terminal display, truncating long values
-    (file content, shell commands) so a single tool call doesn't flood the line."""
+    """Render tool arguments on one line, truncating long values like file content."""
     parts = []
     for k, v in arguments.items():
         s = str(v)
@@ -101,14 +98,13 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
         self.require_confirmation = require_confirmation
-        self._always_allowed: set[str] = set()  # tool names approved for the rest of this session
+        self._always_allowed: set[str] = set()
 
     def _confirm(self, tool_call) -> bool:
         """
-        Permission gate for destructive tools (write_file, edit_file, run_command).
-        Prints the proposed action and asks for y/n, with an "always" option that
-        skips future prompts for that tool name for the rest of this run.
-        Returns True if the call should proceed.
+        Permission gate for tools registered as destructive. Asks y/n, with an
+        "always" option that skips future prompts for that tool name for the
+        rest of the session. Returns True if the call should proceed.
         """
         if not self.require_confirmation:
             return True
@@ -118,7 +114,10 @@ class Agent:
             return True
 
         print(f"\n[PERMISSION] Agent wants to call: {tool_call.name}({_short_args(tool_call.arguments, max_len=200)})")
-        choice = input("Allow? [y]es / [n]o / [a]lways allow this tool: ").strip().lower()
+        try:
+            choice = input("Allow? [y]es / [n]o / [a]lways allow this tool: ").strip().lower()
+        except EOFError:
+            return False
 
         if choice == "a":
             self._always_allowed.add(tool_call.name)
@@ -138,15 +137,14 @@ class Agent:
 
         for iteration in range(self.max_iterations):
             _compact_messages(messages)
-            _debug_print_size(messages, iteration)
+            _log_context_size(messages, iteration)
 
             tools_schema = self.tools.get_schemas() if self.tools else None
             try:
                 response = self.llm.generate(messages, tools=tools_schema)
             except Exception as e:
-                # Don't let an API failure (rate limit, network issue, provider
-                # outage) kill the whole interactive session -- the error
-                # message itself already says what went wrong.
+                # Rate limits, network errors, provider outages: report and
+                # return rather than killing the interactive session.
                 _dump_messages(messages)
                 return f"Agent stopped: the model call failed ({e})."
 

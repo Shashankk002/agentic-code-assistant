@@ -3,16 +3,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any
-
-
 @dataclass
 class ToolCall:
     name: str
     arguments: dict[str, Any]
     id: str | None = None
+    # Gemini thinking models attach an opaque signature to each function
+    # call that must be echoed back on the next turn.
     thought_signature: Any | None = None
 
 
@@ -38,5 +35,4 @@ class BaseLLM(ABC):
         messages: list[ChatMessage],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        """Generate a response from the model given conversation messages and optional tool declarations."""
-        pass
+        """Return the model's reply to `messages`, given optional tool declarations."""

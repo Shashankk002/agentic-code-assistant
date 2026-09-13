@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from dotenv import load_dotenv
 from llm.gemini import GeminiLLM
@@ -11,7 +12,10 @@ load_dotenv()
 
 
 def build_agent(no_confirm: bool = False) -> Agent:
-    llm = GeminiLLM(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        sys.exit("GEMINI_API_KEY is not set. Copy .env.example to .env and add your key.")
+    llm = GeminiLLM(api_key=api_key)
     return Agent(
         llm=llm,
         tools=default_registry,
@@ -50,10 +54,14 @@ def main():
 
         if not user_input:
             continue
-        if user_input.lower() in ("exit", "quit", "bye", "end the session", "stop", "done"):
+        if user_input.lower() in ("exit", "quit"):
             break
 
-        result = agent.run(user_input)
+        try:
+            result = agent.run(user_input)
+        except KeyboardInterrupt:
+            print("\nInterrupted.\n")
+            continue
         print(f"\nAgent:\n{result}\n")
 
 

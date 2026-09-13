@@ -10,20 +10,11 @@ def _is_within_directory(base_dir: str, target_path: str) -> bool:
 
 def write_file(file_path: str, content: str, overwrite: bool = True) -> str:
     """
-    Create a new file with the given content, or overwrite an existing one.
+    Create a file (parent directories included) or overwrite an existing one.
 
-    Unlike edit_file (which requires the file to already exist and replaces a
-    unique snippet), write_file is for creating new files from scratch, or
-    fully replacing a file's contents. Missing parent directories are created
-    automatically.
-
-    Safety: refuses to write outside the current working directory (repo
-    root), same jail policy as the sandboxed run_command tool, so the model
-    can't be tricked into writing files elsewhere on the machine.
-
-    If overwrite=False and the file already exists, this returns an error
-    instead of clobbering it -- use edit_file for targeted changes to
-    existing files instead.
+    Refuses to write outside the current working directory, matching the
+    workdir jail in run_command. With overwrite=False, an existing file is
+    left untouched and an error is returned.
     """
     repo_root = os.getcwd()
     resolved_path = os.path.realpath(file_path)

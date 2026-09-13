@@ -1,59 +1,59 @@
 import os
+import signal
 import subprocess
 
 try:
     import resource
     _HAS_RESOURCE = True
 except ImportError:
-    # `resource` is POSIX-only (no Windows support). Fall back gracefully
-    # instead of crashing on import for Windows users.
+    # `resource` is POSIX-only. On Windows the timeout and working-directory
+    # jail still apply; CPU/memory limits are skipped.
     _HAS_RESOURCE = False
 
-# --- Sandbox limits (tune these as needed) ---
 DEFAULT_TIMEOUT_SECONDS = 30
-MAX_TIMEOUT_SECONDS = 45      # hard ceiling — no caller (including the model
-                               # itself, via the timeout tool parameter) can
-                               # request more than this. Without a ceiling,
-                               # a helpful-but-wrong model can simply ask for
-                               # a bigger timeout and bypass the sandbox.
-MAX_CPU_SECONDS = 10          # hard CPU time cap for the child process
-MAX_MEMORY_BYTES = 512 * 1024 * 1024   # 512 MB address space cap
-MAX_OUTPUT_CHARS = 20_000     # truncate huge stdout/stderr so it can't flood context
-MAX_PROCESSES = 32            # cap on forked/spawned subprocesses (fork bombs)
+# Hard ceiling. The model can lower the timeout via the tool parameter but
+# never raise it past this, otherwise it could bypass the sandbox by simply
+# asking for a bigger number.
+MAX_TIMEOUT_SECONDS = 45
+MAX_CPU_SECONDS = 10
+MAX_MEMORY_BYTES = 512 * 1024 * 1024
+MAX_OUTPUT_CHARS = 20_000
 
 
 def _apply_resource_limits():
     """
-    Runs in the child process right after fork(), before exec().
-    This is what actually enforces CPU/memory/process caps on the command —
-    the parent process (this Python program) is unaffected.
+    Runs in the child between fork() and exec(), so the limits apply to the
+    command and not to this program.
 
-    POSIX only. On Windows this is skipped (see _HAS_RESOURCE above); the
-    timeout and working-directory jail still apply there.
+    Each limit is set in its own try/except. RLIMIT_AS is rejected on macOS
+    ("current limit exceeds maximum limit"), and if that exception escaped,
+    subprocess would report the whole preexec_fn as failed and the command
+    would never run. An unsupported limit is skipped instead.
 
-    Each limit is applied independently and failures are swallowed rather
-    than raised: RLIMIT_AS (memory) and RLIMIT_NPROC (process count) are
-    known to be unsupported or unreliable on macOS's kernel, even though the
-    constants exist in the `resource` module. If any one of these raised
-    inside a single unguarded block, subprocess would report the whole
-    preexec_fn as failed and the command would never run at all -- which is
-    exactly what happened here. Setting each limit in its own try/except
-    means an unsupported limit is silently skipped instead of blocking
-    otherwise-harmless commands like `sleep 40`.
+    RLIMIT_NPROC is deliberately not set. It counts every process owned by
+    the *user*, not just this command's subtree, so a small value makes the
+    shell unable to fork at all -- pipelines and `a && b` fail with
+    "fork: Resource temporarily unavailable" while single commands still
+    work because sh exec()s them directly.
     """
     for limit_type, values in (
         (resource.RLIMIT_CPU, (MAX_CPU_SECONDS, MAX_CPU_SECONDS)),
         (resource.RLIMIT_AS, (MAX_MEMORY_BYTES, MAX_MEMORY_BYTES)),
-        # RLIMIT_NPROC caps how many processes the resulting UID can have,
-        # a cheap guard against fork bombs like `:(){ :|:& };:` -- where supported.
-        (resource.RLIMIT_NPROC, (MAX_PROCESSES, MAX_PROCESSES)),
     ):
         try:
             resource.setrlimit(limit_type, values)
         except (ValueError, OSError):
-            # Not supported/enforceable on this platform -- skip it rather
-            # than aborting the whole command.
             pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        proc.kill()
 
 
 def _is_within_directory(base_dir: str, target_dir: str) -> bool:
@@ -69,29 +69,21 @@ def run_command(
     workdir: str | None = None,
 ) -> str:
     """
-    Execute a shell command with sandboxing, and return exit code and output.
+    Execute a shell command and return its exit code and combined output.
 
     Sandboxing applied:
-      - timeout: the command is killed if it runs longer than `timeout` seconds
-        (this was previously broken — TimeoutExpired was caught but never
-        actually triggered, since no timeout was passed to subprocess.run).
-      - resource limits: CPU time, memory, and process count are capped for
-        the child process (POSIX only).
-      - working-directory jail: the command's cwd is restricted to the
-        repository root (or `workdir`, if given) and cannot be pointed
-        outside of it.
-      - output truncation: stdout/stderr are capped so a runaway command
-        can't blow up the agent's context window.
+      - timeout: the command and every process it spawned are killed after
+        `timeout` seconds (clamped to MAX_TIMEOUT_SECONDS).
+      - resource limits: CPU time and address space are capped for the child
+        (POSIX only; see _apply_resource_limits).
+      - working-directory jail: cwd must be the repository root or inside it.
+      - output truncation: stdout/stderr are capped at MAX_OUTPUT_CHARS so a
+        runaway command can't flood the model's context.
 
-    NOT protected against by this alone: this is process-level sandboxing,
-    not a real security boundary. A command can still read/write/delete any
-    file the resolved workdir has access to, and network access is
-    unrestricted. For a stronger boundary, run inside a container (see notes
-    in PROJECT_GUIDE.md).
+    This is process-level sandboxing, not a security boundary: the command
+    can still touch any path the user can, and network access is
+    unrestricted.
     """
-    # Clamp regardless of what was requested. This line is the whole point:
-    # the timeout parameter exists so a caller can *lower* the limit for
-    # commands expected to be fast, not raise it past what the sandbox allows.
     timeout = min(max(timeout, 1), MAX_TIMEOUT_SECONDS)
 
     repo_root = os.getcwd()
@@ -104,22 +96,32 @@ def run_command(
         )
 
     try:
-        result = subprocess.run(
+        # start_new_session puts the shell and everything it spawns in their
+        # own process group, so a timeout can kill the whole tree. Killing
+        # just the shell would leave e.g. `sleep 100 | cat` running after
+        # we report the timeout.
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             cwd=resolved_workdir,
-            timeout=timeout,
-            check=False,
+            start_new_session=True,
             preexec_fn=_apply_resource_limits if _HAS_RESOURCE else None,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            proc.communicate()
+            return f"Error: Command timed out after {timeout} seconds."
 
         output_parts = []
-        if result.stdout:
-            output_parts.append(result.stdout.strip())
-        if result.stderr:
-            output_parts.append(result.stderr.strip())
+        if stdout:
+            output_parts.append(stdout.strip())
+        if stderr:
+            output_parts.append(stderr.strip())
 
         output_str = "\n".join(output_parts)
         if len(output_str) > MAX_OUTPUT_CHARS:
@@ -129,10 +131,8 @@ def run_command(
             )
 
         if output_str:
-            return f"Exit code: {result.returncode}\n{output_str}"
-        return f"Exit code: {result.returncode}"
+            return f"Exit code: {proc.returncode}\n{output_str}"
+        return f"Exit code: {proc.returncode}"
 
-    except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {timeout} seconds."
     except Exception as e:
         return f"Error executing command: {e}"

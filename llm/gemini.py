@@ -20,7 +20,6 @@ class GeminiLLM(BaseLLM):
 
         for msg in messages:
             if msg.role == "system":
-                # Gemini accepts system_instruction in GenerateContentConfig
                 if msg.content:
                     system_instruction = (
                         f"{system_instruction}\n{msg.content}"
@@ -85,7 +84,6 @@ class GeminiLLM(BaseLLM):
             config=config,
         )
 
-        # Parse response
         content_text = ""
         tool_calls: list[ToolCall] = []
 

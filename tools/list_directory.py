@@ -1,26 +1,13 @@
 import os
 
-# Directories that are almost never useful to an agent exploring source code,
-# and tend to flood output with noise (compiled artifacts, VCS internals,
-# dependency trees). Skipped by default; pass include_noise=True to see them.
+# Skipped by default so a recursive listing doesn't walk into .venv or .git.
 _NOISE_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".pytest_cache"}
 
 
 def list_directory(path: str = ".", include_noise: bool = False, recursive: bool = False) -> str:
     """
-    List a directory's contents. Non-recursive by default; pass recursive=True
-    to walk the full tree in one call instead of listing one level at a time.
-
-    Directories are shown with a trailing '/'. By default, common noise
-    directories (__pycache__, .git, .venv, etc.) are filtered out -- this
-    matters even more with recursive=True, since without it a recursive
-    listing would walk into installed packages inside .venv and flood the
-    output with thousands of irrelevant lines.
-
-    This is the tool to reach for when you need to know what files exist --
-    prefer it over run_command's `ls`/`find` (loses sandboxing benefits, and
-    a hand-written os.walk script risks forgetting to exclude .venv/.git) and
-    over search_code (which requires a text pattern and isn't for enumeration).
+    List a directory. Non-recursive by default (directories get a trailing
+    '/'); with recursive=True, returns every file path under `path`.
     """
     if not recursive:
         try:
@@ -43,7 +30,6 @@ def list_directory(path: str = ".", include_noise: bool = False, recursive: bool
             return f"'{path}' is empty (or contains only filtered noise directories)."
         return "\n".join(lines)
 
-    # Recursive case
     if not os.path.isdir(path):
         return f"Directory not found: {path}"
 
